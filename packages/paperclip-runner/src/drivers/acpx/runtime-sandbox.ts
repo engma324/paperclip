@@ -28,6 +28,10 @@ import {
 } from "node:path";
 
 import { createSanitizedAcpxSpawnInput } from "./environment.js";
+import {
+  parseAcpxCodexProviderConfig,
+  renderAcpxCodexProviderConfigToml,
+} from "./codex-provider-config.js";
 import type { QualifiedAcpxAgent } from "./qualified-profiles.js";
 import {
   resolveAcpxRuntimeRoot,
@@ -415,6 +419,18 @@ export async function prepareAcpxRuntimeSandbox(input: {
         }
       : {}),
   });
+  if (input.agent === "codex") {
+    const codexProviders = parseAcpxCodexProviderConfig(
+      launchEnvironment.PAPERCLIP_CODEX_PROVIDERS,
+    );
+    if (codexProviders !== null) {
+      await writePrivateFile(
+        join(agentHomeDirectory, "config.toml"),
+        renderAcpxCodexProviderConfigToml(codexProviders),
+      );
+    }
+    delete launchEnvironment.PAPERCLIP_CODEX_PROVIDERS;
+  }
   validateEnvironmentSize(launchEnvironment);
   const persistedEnvironment = Object.fromEntries(
     Object.entries(launchEnvironment).filter(

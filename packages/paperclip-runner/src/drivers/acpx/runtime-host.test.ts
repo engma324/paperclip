@@ -197,6 +197,35 @@ describe("ACPX runtime host", () => {
     expect(fixture.commandClose).not.toHaveBeenCalled();
   });
 
+  it("fails codex admission on malformed PAPERCLIP_CODEX_PROVIDERS before provider start", async () => {
+    const fixture = await hostFixture();
+    const openRuntime = vi.fn(async () => runtimePort());
+    const stageCredential = vi.fn(async () => {
+      throw new Error("credential staging must not start");
+    });
+    const dependencies = fixture.dependencies({ openRuntime });
+    dependencies.stageCredential = stageCredential;
+
+    await expect(
+      AcpxRuntimeHost.open(
+        {
+          ...fixture.options,
+          agent: "codex",
+          model: "gpt-5.6-sol",
+          permissionMode: "deny-all",
+          environment: {
+            PAPERCLIP_CODEX_PROVIDERS: "{not-json}",
+          },
+        },
+        dependencies,
+      ),
+    ).rejects.toThrow("PAPERCLIP_CODEX_PROVIDERS contains invalid JSON");
+
+    expect(stageCredential).not.toHaveBeenCalled();
+    expect(openRuntime).not.toHaveBeenCalled();
+    expect(fixture.commandClose).not.toHaveBeenCalled();
+  });
+
   it("retains aborted sandbox preparation until its filesystem work settles", async () => {
     const fixture = await hostFixture();
     const controller = trackedAdmissionController();

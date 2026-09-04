@@ -55,6 +55,7 @@ export function createSanitizedAcpxSpawnInput(
     "RUST_BACKTRACE",
     "PAPERCLIP_NATIVE_MCP_NAME",
     "PAPERCLIP_NATIVE_MCP_URL",
+    ...(agent === "codex" ? ["PAPERCLIP_CODEX_PROVIDERS"] : []),
     ...credentialNames,
   ]);
   let retainedBytes = 0;

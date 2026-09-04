@@ -108,6 +108,131 @@ describe("ACPX runtime sandbox", () => {
     },
   );
 
+  it("writes PAPERCLIP_CODEX_PROVIDERS into isolated CODEX_HOME/config.toml", async () => {
+    const fixture = await sandboxFixture("codex");
+    const sandbox = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+      environment: {
+        OPENAI_API_KEY: "launch-only-secret",
+        PAPERCLIP_CODEX_PROVIDERS: JSON.stringify({
+          providers: {
+            azure_foundry: {
+              base_url: "https://resource.openai.azure.com/openai/v1/",
+              env_key: "OPENAI_API_KEY",
+              wire_api: "responses",
+            },
+          },
+          model_provider: "azure_foundry",
+        }),
+      },
+    });
+
+    const configToml = await readFile(
+      join(sandbox.agentHomeDirectory, "config.toml"),
+      "utf8",
+    );
+    expect(configToml).toContain('model_provider = "azure_foundry"');
+    expect(configToml).toContain("[model_providers.azure_foundry]");
+    expect(configToml).toContain(
+      'base_url = "https://resource.openai.azure.com/openai/v1/"',
+    );
+    expect(configToml).toContain('env_key = "OPENAI_API_KEY"');
+    expect(configToml).toContain('wire_api = "responses"');
+    expect(sandbox.launchEnvironment.OPENAI_API_KEY).toBe("launch-only-secret");
+    expect(sandbox.launchEnvironment.PAPERCLIP_CODEX_PROVIDERS).toBeUndefined();
+    expect(sandbox.persistedEnvironment.OPENAI_API_KEY).toBeUndefined();
+    expect(sandbox.persistedEnvironment.PAPERCLIP_CODEX_PROVIDERS).toBeUndefined();
+  });
+
+  it("treats unset or blank PAPERCLIP_CODEX_PROVIDERS as a no-op", async () => {
+    const fixture = await sandboxFixture("codex");
+    for (const providers of [undefined, "", "  "]) {
+      const sandbox = await prepareAcpxRuntimeSandbox({
+        binding: fixture.binding,
+        agent: "codex",
+        environment: {
+          ...(providers === undefined
+            ? {}
+            : { PAPERCLIP_CODEX_PROVIDERS: providers }),
+        },
+      });
+      await expect(
+        stat(join(sandbox.agentHomeDirectory, "config.toml")),
+      ).rejects.toThrow();
+    }
+  });
+
+  it("rejects malformed PAPERCLIP_CODEX_PROVIDERS", async () => {
+    const fixture = await sandboxFixture("codex");
+    await expect(
+      prepareAcpxRuntimeSandbox({
+        binding: fixture.binding,
+        agent: "codex",
+        environment: { PAPERCLIP_CODEX_PROVIDERS: "{not-json}" },
+      }),
+    ).rejects.toThrow("PAPERCLIP_CODEX_PROVIDERS contains invalid JSON");
+    await expect(
+      prepareAcpxRuntimeSandbox({
+        binding: fixture.binding,
+        agent: "codex",
+        environment: {
+          PAPERCLIP_CODEX_PROVIDERS: JSON.stringify({
+            providers: { azure_foundry: { base_url: "https://example.test/v1" } },
+            model_provider: "missing",
+          }),
+        },
+      }),
+    ).rejects.toThrow('model_provider "missing" does not match a configured provider');
+    await expect(
+      prepareAcpxRuntimeSandbox({
+        binding: fixture.binding,
+        agent: "codex",
+        environment: {
+          PAPERCLIP_CODEX_PROVIDERS: JSON.stringify({
+            providers: {
+              azure_foundry: {
+                base_url: "https://example.test/v1",
+                http_headers: {
+                  Authorization: "{env:OPENAI_API_KEY}",
+                },
+              },
+            },
+          }),
+        },
+      }),
+    ).rejects.toThrow("{env:VAR} placeholders, which are not supported in ACPX");
+  });
+
+  it("escapes provider config values and keys to prevent TOML injection", async () => {
+    const fixture = await sandboxFixture("codex");
+    const sandbox = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+      environment: {
+        PAPERCLIP_CODEX_PROVIDERS: JSON.stringify({
+          providers: {
+            'azure_foundry"]\n[attacker': {
+              base_url:
+                'https://resource.openai.azure.com/openai/v1/"\n[attacker]\nkey="x',
+              env_key: "OPENAI_API_KEY",
+            },
+          },
+        }),
+      },
+    });
+
+    const configToml = await readFile(
+      join(sandbox.agentHomeDirectory, "config.toml"),
+      "utf8",
+    );
+    expect(configToml).toContain('[model_providers."azure_foundry\\"]\\n[attacker"]');
+    expect(configToml).toContain(
+      'base_url = "https://resource.openai.azure.com/openai/v1/\\"\\n[attacker]\\nkey=\\"x"',
+    );
+    expect(configToml.match(/^\[attacker\]$/m)).toBeNull();
+  });
+
   it("re-prepares and re-synchronizes an existing private sandbox", async () => {
     const fixture = await sandboxFixture("claude");
     const first = await prepareAcpxRuntimeSandbox({

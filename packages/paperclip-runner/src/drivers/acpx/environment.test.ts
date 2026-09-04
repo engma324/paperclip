@@ -9,6 +9,8 @@ describe("ACPX launch environment", () => {
       LC_ALL: "C.UTF-8",
       HTTPS_PROXY: "https://proxy.example",
       OPENAI_API_KEY: "openai-secret",
+      PAPERCLIP_CODEX_PROVIDERS:
+        '{"providers":{"azure_foundry":{"base_url":"https://example.openai.azure.com/openai/v1/","env_key":"OPENAI_API_KEY","wire_api":"responses"}},"model_provider":"azure_foundry"}',
       ANTHROPIC_API_KEY: "anthropic-secret",
       OPENROUTER_API_KEY: "openrouter-secret",
       PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET:
@@ -24,6 +26,8 @@ describe("ACPX launch environment", () => {
       LC_ALL: "C.UTF-8",
       HTTPS_PROXY: "https://proxy.example",
       OPENAI_API_KEY: "openai-secret",
+      PAPERCLIP_CODEX_PROVIDERS:
+        '{"providers":{"azure_foundry":{"base_url":"https://example.openai.azure.com/openai/v1/","env_key":"OPENAI_API_KEY","wire_api":"responses"}},"model_provider":"azure_foundry"}',
     });
     expect(createSanitizedAcpxSpawnInput(source, "claude").env).toEqual({
       PATH: "/bin",
