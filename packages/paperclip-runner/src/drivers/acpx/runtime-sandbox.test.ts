@@ -140,6 +140,7 @@ describe("ACPX runtime sandbox", () => {
       join(sandbox.agentHomeDirectory, "config.toml"),
       "utf8",
     );
+    expect(configToml).toContain("[features]\nshell_snapshot = false");
     expect(configToml).toContain('model_provider = "azure_foundry"');
     expect(configToml).toContain("[model_providers.azure_foundry]");
     expect(configToml).toContain(
@@ -166,8 +167,8 @@ describe("ACPX runtime sandbox", () => {
         },
       });
       await expect(
-        stat(join(sandbox.agentHomeDirectory, "config.toml")),
-      ).rejects.toThrow();
+        readFile(join(sandbox.agentHomeDirectory, "config.toml"), "utf8"),
+      ).resolves.toBe("[features]\nshell_snapshot = false\n");
     }
   });
 

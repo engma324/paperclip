@@ -41,6 +41,7 @@ import {
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const MAX_SANDBOX_ENVIRONMENT_BYTES = 512 * 1024;
+const CODEX_BASE_CONFIG_TOML = "[features]\nshell_snapshot = false\n";
 const MAX_WORKSPACE_RECORD_BYTES = 64 * 1024;
 
 export interface AcpxRuntimeSandbox {
@@ -383,17 +384,7 @@ export async function prepareAcpxRuntimeSandbox(input: {
   if (input.agent === "codex") {
     await writePrivateFile(
       join(agentHomeDirectory, "config.toml"),
-      [
-        // Codex shell snapshots serialize the provider process environment.
-        // The ACPX sidecar receives a short-lived managed credential only so
-        // it can authenticate the provider; that value must never become
-        // durable runtime state. Keep this identical to the proven native
-        // Codex isolation policy: broader shell-environment filtering can
-        // also affect provider startup and belongs at the launch boundary.
-        "[features]",
-        "shell_snapshot = false",
-        "",
-      ].join("\n"),
+      CODEX_BASE_CONFIG_TOML,
     );
   }
 
@@ -442,7 +433,7 @@ export async function prepareAcpxRuntimeSandbox(input: {
     if (codexProviders !== null) {
       await writePrivateFile(
         join(agentHomeDirectory, "config.toml"),
-        renderAcpxCodexProviderConfigToml(codexProviders),
+        `${CODEX_BASE_CONFIG_TOML}\n${renderAcpxCodexProviderConfigToml(codexProviders)}`,
       );
     }
     delete launchEnvironment.PAPERCLIP_CODEX_PROVIDERS;
