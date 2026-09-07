@@ -42,9 +42,11 @@ import { copyBackCodexAuth } from "./codex-auth-copyback.js";
 import { buildCodexAuthInboundProvision } from "./codex-auth-merge-scripts.js";
 import {
   evaluateCodexCredentialReadiness,
+  isManagedCodexHomePath,
   resolveSharedCodexHomeDir,
   stageCodexHomeForSync,
 } from "./codex-home.js";
+import { prepareCodexRuntimeConfig } from "./runtime-config.js";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "./auth-check.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -265,10 +267,33 @@ async function prepareCodexRemoteManagedHome(
   };
 }
 
+async function prepareCodexAcpProviderConfig(input: {
+  companyId: string;
+  config: Record<string, unknown>;
+  env: Record<string, string>;
+  codexHome: string;
+  onLog: AdapterExecutionContext["onLog"];
+}) {
+  const configuredEnv = parseObject(input.config.env);
+  const configuredCodexHome = firstNonEmptyString(configuredEnv.CODEX_HOME);
+  const managedHome =
+    configuredCodexHome === undefined ||
+    isManagedCodexHomePath(process.env, input.companyId, input.codexHome);
+  const prepared = await prepareCodexRuntimeConfig({
+    env: input.env,
+    codexHome: managedHome ? input.codexHome : null,
+  });
+  return {
+    commandNotes: prepared.notes,
+    cleanup: prepared.cleanup,
+  };
+}
+
 function withCodexAcpDefaults(options: CodexAcpExecutorOptions): AcpxEngineExecutorOptions {
   return {
     resolveBillingIdentity: resolveCodexAcpBillingIdentity,
     prepareRemoteManagedHome: prepareCodexRemoteManagedHome,
+    prepareCodexProviderConfig: prepareCodexAcpProviderConfig,
     ...options,
     adapterType: "codex_local",
     moduleDir,

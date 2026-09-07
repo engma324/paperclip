@@ -769,6 +769,67 @@ describe("codex_local ACP lane", () => {
     });
   });
 
+  it("merges and restores provider config in the managed ACPX Codex home", async () => {
+    const root = await makeTempRoot("paperclip-codex-acp-provider-config-");
+    const managedHome = path.join(
+      root,
+      "paperclip-home",
+      "instances",
+      "test",
+      "companies",
+      "company-1",
+      "codex-home",
+    );
+    const baselineConfig = "[features]\nshell_snapshot = false\n";
+    await fs.mkdir(managedHome, { recursive: true });
+    await fs.writeFile(path.join(managedHome, "config.toml"), baselineConfig, "utf8");
+    let configDuringSession = "";
+    const execute = createCodexAcpExecutor({
+      createRuntime: (options: FakeRuntimeOptions) => {
+        const runtime = new FakeRuntime(options);
+        const ensureSession = runtime.ensureSession.bind(runtime);
+        runtime.ensureSession = async (input) => {
+          configDuringSession = await fs.readFile(
+            path.join(managedHome, "config.toml"),
+            "utf8",
+          );
+          return await ensureSession(input);
+        };
+        return runtime as never;
+      },
+    });
+
+    const result = await execute(buildContext(root, {
+      config: {
+        engine: "acp",
+        cwd: root,
+        stateDir: path.join(root, "state"),
+        env: {
+          CODEX_HOME: managedHome,
+          OPENAI_API_KEY: "test-key",
+          PAPERCLIP_CODEX_PROVIDERS: JSON.stringify({
+            providers: {
+              azure_foundry: {
+                base_url: "https://resource.openai.azure.com/openai/v1/",
+                env_key: "OPENAI_API_KEY",
+                wire_api: "responses",
+              },
+            },
+            model_provider: "azure_foundry",
+          }),
+        },
+      },
+    }));
+
+    expect(result.exitCode, JSON.stringify(result)).toBe(0);
+    expect(configDuringSession).toContain(baselineConfig.trim());
+    expect(configDuringSession).toContain('model_provider = "azure_foundry"');
+    expect(configDuringSession).toContain("[model_providers.azure_foundry]");
+    await expect(fs.readFile(path.join(managedHome, "config.toml"), "utf8")).resolves.toBe(
+      baselineConfig,
+    );
+  });
+
   it("creates the ACP session on the in-sandbox workspace cwd for runner-backed remote runs", async () => {
     const root = await makeTempRoot("paperclip-codex-acp-remote-cwd-");
     const localCwd = path.join(root, "worktree");

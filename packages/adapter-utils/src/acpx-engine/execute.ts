@@ -375,6 +375,17 @@ export interface AcpxEngineExecutorOptions {
   prepareRemoteManagedHome?: (
     input: AcpxRemoteManagedHomeContext,
   ) => Promise<AcpxRemoteManagedHomeResult>;
+  /** Configure a prepared Codex home before the ACP session starts. */
+  prepareCodexProviderConfig?: (input: {
+    companyId: string;
+    config: Record<string, unknown>;
+    env: Record<string, string>;
+    codexHome: string;
+    onLog: AdapterExecutionContext["onLog"];
+  }) => Promise<{
+    commandNotes?: string[];
+    cleanup?: () => void | Promise<void>;
+  }>;
   /**
    * Observe the final per-resource disposition report the run records at the end
    * of the attempt (`finalized` vs `transferred`). The coordinator records it on
@@ -1202,7 +1213,7 @@ async function prepareCodexSkillRuntime(input: {
   // same host→sandbox counters as its siblings (0 here — skill prep is
   // host-only — which is itself the answer to "does this step exec?").
   stepMetrics?: StartupStepMeasureOptions;
-}): Promise<{ identity: Record<string, unknown>; commandNotes: string[] }> {
+}): Promise<{ identity: Record<string, unknown>; commandNotes: string[]; codexHome: string }> {
   const now = input.now ?? (() => Date.now());
   const envConfig = parseObject(input.config.env);
   const configuredCodexHome =
@@ -1267,6 +1278,7 @@ async function prepareCodexSkillRuntime(input: {
   input.env.CODEX_HOME = effectiveCodexHome;
 
   return {
+    codexHome: effectiveCodexHome,
     identity: {
       mode: "codex",
       skillSetKey,
@@ -1679,6 +1691,7 @@ async function buildRuntime(input: {
   // seam. `buildRuntime` threads it into the staging seam. When it is absent, the
   // staging seam opens no `pack` span.
   stageRuntimeSpan?: RuntimeSpanRunner;
+  registerCleanup: (cleanup: () => void | Promise<void>) => void;
 }): Promise<AcpxPreparedRuntime> {
   const { runId, agent, config, context, authToken } = input.ctx;
   // Injectable monotonic clock for per-step startup timing. Hoisted above the
@@ -1975,6 +1988,19 @@ async function buildRuntime(input: {
     );
     skillsIdentity = preparedSkills.identity;
     skillCommandNotes.push(...preparedSkills.commandNotes);
+    const preparedProviderConfig = await input.deps.prepareCodexProviderConfig?.({
+      companyId: agent.companyId,
+      config,
+      env,
+      codexHome: preparedSkills.codexHome,
+      onLog: input.ctx.onLog,
+    });
+    if (preparedProviderConfig) {
+      skillCommandNotes.push(...(preparedProviderConfig.commandNotes ?? []));
+      if (preparedProviderConfig.cleanup) {
+        input.registerCleanup(preparedProviderConfig.cleanup);
+      }
+    }
   } else if (acpxAgent === "gemini") {
     const preparedSkills = await prepareGeminiSkillRuntime({
       config,
@@ -3778,6 +3804,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
     // null on the host lane (no staging) and on a build failure (where
     // `buildRuntime` already released its own partial lease).
     let releaseStagingLease: (() => void) | null = null;
+    const runCleanups: Array<() => void | Promise<void>> = [];
     try {
       // Evict idle staged runtimes BEFORE building the runtime, since buildRuntime
       // consults the staged cache to decide whether a compatible resume may reuse
@@ -3964,6 +3991,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             getRuntimeParentContext,
             runtimeSpan: runRuntimeSpan,
             stageRuntimeSpan: runStageSpan,
+            registerCleanup: (cleanup) => runCleanups.push(cleanup),
           }),
         );
         buildRuntimeSettled = true;
@@ -5065,6 +5093,14 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
     } finally {
       // End the run root span exactly once, on every return and on a throw.
       runRootSpan.end(runFailed);
+      for (const cleanup of runCleanups.reverse()) {
+        await Promise.resolve(cleanup()).catch(async () => {
+          await ctx.onLog(
+            "stderr",
+            "[paperclip] ACPX Codex provider configuration cleanup failed.\n",
+          ).catch(() => {});
+        });
+      }
       // Release the per-session staging lease as the run's final act, AFTER the
       // coordinator settled every other resource and reproduced the result. It runs
       // last, in this `finally`, so a same-session second run stays blocked on the
