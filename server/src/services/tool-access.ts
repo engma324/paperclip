@@ -1,3 +1,5 @@
+import { canBrowseProjectRepositoryGrant, mergeProjectRepository } from "./project-repositories.js";
+import { captureRunIdentity } from "./run-identity.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, max, ne, sql } from "drizzle-orm";
@@ -1929,6 +1931,27 @@ function managedConnectorProfile(value: string | undefined): {
   return null;
 }
 
+export async function loadGitHubTokenRepositories(headers: Record<string, string>, request: typeof fetch = fetch) {
+  const repositories: Array<{ id: string; fullName: string; private?: boolean }> = [];
+  for (let page = 1; ; page += 1) {
+    const response = await request(`https://api.github.com/user/repos?per_page=100&page=${page}`, {
+      headers: { ...headers, accept: "application/vnd.github+json", "user-agent": "Paperclip", "x-github-api-version": "2022-11-28" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) throw unprocessable("Could not load GitHub repositories. Reconnect GitHub and try again.");
+    const rows: unknown = await response.json();
+    if (!Array.isArray(rows)) throw unprocessable("GitHub returned invalid repositories");
+    for (const row of rows) {
+      if (!recordValue(row) || !githubId(row.id) || typeof row.full_name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9-]*\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/.test(row.full_name)) {
+        throw unprocessable("GitHub returned invalid repository metadata");
+      }
+      repositories.push({ id: githubId(row.id)!, fullName: row.full_name, ...(typeof row.private === "boolean" ? { private: row.private } : {}) });
+    }
+    if (!/;\s*rel="next"/.test(response.headers.get("link") ?? "")) return repositories;
+    if (!rows.length) throw unprocessable("GitHub returned invalid pagination");
+  }
+}
+
 export async function loadGitHubGrantMetadata(
   accessToken: string,
   request: typeof fetch = fetch,
@@ -2013,7 +2036,7 @@ export async function loadGitHubGrantMetadata(
     for (const repository of await list(`/user/installations/${installationId}/repositories`, "repositories")) {
       const id = githubId(repository.id);
       const fullName = typeof repository.full_name === "string" ? repository.full_name : "";
-      if (!id || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(fullName)) {
+      if (!id || !/^[A-Za-z0-9][A-Za-z0-9-]*\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/.test(fullName)) {
         throw unprocessable("GitHub returned invalid repository metadata", { code: "github_bad_response" });
       }
       repositories.set(id, {
@@ -2832,7 +2855,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
   }
 
   async function loadBrokerRunContext(input: { companyId: string; agentId: string; runId: string }) {
-    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.runId));
+    const [initialRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.runId));
+    const run = initialRun?.activeIdentityContextId ? (await captureRunIdentity(db, input)).run : initialRun;
     if (!run || run.companyId !== input.companyId || run.agentId !== input.agentId) {
       throw forbidden("Agent run context does not match the authenticated actor");
     }
@@ -2841,7 +2865,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     }
     const snapshot = asRecord(run.contextSnapshot);
     const paperclipIssue = asRecord(snapshot.paperclipIssue);
-    const responsibleUserId = runSnapshotString(snapshot, "responsibleUserId", "responsible_user_id")
+    const responsibleUserId = run.activeIdentityContextId ? run.responsibleUserId : runSnapshotString(snapshot, "responsibleUserId", "responsible_user_id")
       ?? runSnapshotString(paperclipIssue, "responsibleUserId", "responsible_user_id")
       ?? run.responsibleUserId;
     if (!responsibleUserId) {
@@ -4195,6 +4219,14 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           eq(companySecretBindings.targetId, connection.id),
         ),
       );
+    // A metadata edit or pause/resume must retain declarations for every
+    // active personal/dedicated grant, not just connection-owned credentials.
+    const activeGrants = await dbClient.select({ refs: connectionGrants.credentialSecretRefs })
+      .from(connectionGrants).where(and(
+        eq(connectionGrants.companyId, connection.companyId),
+        eq(connectionGrants.connectionId, connection.id),
+        eq(connectionGrants.status, "active"),
+      ));
     const rawBindings = [
       ...connection.credentialRefs.map((ref) => ({
         secretId: ref.secretId,
@@ -4204,7 +4236,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         required: true,
         label: null,
       })),
-      ...[...connection.credentialSecretRefs, ...grantSecretRefs].map((ref) => ({
+      ...[...connection.credentialSecretRefs, ...grantSecretRefs, ...activeGrants.flatMap((grant) => grant.refs)].map((ref) => ({
         secretId: ref.secretId,
         configPath: ref.configPath,
         projectionClass: ref.projectionClass ?? "unclassified",
@@ -8757,13 +8789,14 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
 
     let existingApplication: typeof toolApplications.$inferSelect | null = null;
     let requestedResumeConnection: typeof toolConnections.$inferSelect | null = null;
-    if (input.resumeConnectionId) {
+    const requestedConnectionId = input.resumeConnectionId ?? input.reconnectConnectionId;
+    if (requestedConnectionId) {
       const [connection] = await db.select().from(toolConnections).where(and(
-        eq(toolConnections.id, input.resumeConnectionId),
+        eq(toolConnections.id, requestedConnectionId),
         eq(toolConnections.companyId, companyId),
       ));
       if (!connection) throw notFound("Incomplete app connection not found");
-      if (connection.status !== "draft") {
+      if (input.resumeConnectionId && connection.status !== "draft") {
         throw conflict("Only an incomplete app connection can resume setup", {
           code: "connection_setup_not_incomplete",
         });
@@ -8776,6 +8809,10 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         eq(toolApplications.companyId, companyId),
       ));
       if (!application) throw notFound("App not found");
+      const source = asRecord(connection.config).sourceTemplateKey ?? asRecord(connection.transportConfig).sourceTemplateKey ?? asRecord(application.metadata).sourceTemplateKey ?? asRecord(application.metadata).source;
+      if (input.reconnectConnectionId && ((galleryEntry && source !== galleryEntry.slug) || (!galleryEntry && typeof source === "string" && getConnectableAppDefinition(source)))) {
+        throw badRequest("Reconnect must preserve the configured provider");
+      }
       requestedResumeConnection = connection;
       existingApplication = application;
     } else if (input.applicationId) {
@@ -9891,6 +9928,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           metadata: { source: "app_gallery_finish" },
         }));
     const transactionResult = await db.transaction(async (tx) => {
+      await tx.select({ id: toolConnections.id }).from(toolConnections).where(and(eq(toolConnections.id, connectionId), eq(toolConnections.companyId, companyId))).for("update");
       const [existingProfile] = await tx
         .select()
         .from(toolProfiles)
@@ -9898,6 +9936,12 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         .limit(1);
       let profileId: string;
       if (existingProfile) {
+        if (input.preserveExistingAccess) {
+          const priorBindings = await tx.select().from(toolProfileBindings).where(eq(toolProfileBindings.profileId, existingProfile.id));
+          for (const prior of priorBindings) if (!bindingInputs.some((binding) => binding.targetType === prior.targetType && binding.targetId === prior.targetId)) bindingInputs.push({ targetType: prior.targetType, targetId: prior.targetId, priority: prior.priority, metadata: prior.metadata });
+          const priorEntries = await tx.select().from(toolProfileEntries).where(eq(toolProfileEntries.profileId, existingProfile.id));
+          for (const prior of priorEntries) if (!entries.some((entry) => entry.catalogEntryId && entry.catalogEntryId === prior.catalogEntryId)) entries.push({ selectorType: prior.selectorType, effect: prior.effect, applicationId: prior.applicationId, connectionId: prior.connectionId, catalogEntryId: prior.catalogEntryId, toolName: prior.toolName, riskLevel: prior.riskLevel, conditions: prior.conditions });
+        }
         await tx
           .delete(toolProfileBindings)
           .where(and(eq(toolProfileBindings.companyId, companyId), eq(toolProfileBindings.profileId, existingProfile.id)));
@@ -10016,6 +10060,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         companyId,
         connection,
         askFirstEntries: askFirstRows,
+        disableStale: !input.preserveExistingAccess,
         actor,
       }, tx);
       const [updatedConnection] = await tx
@@ -10769,7 +10814,17 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     suggestedDefaults: ConnectToolAppResult["suggestedDefaults"];
     activateQuarantined?: boolean;
     actor?: ActorInfo;
+    interactionId?: string | null;
   }) {
+    const linkedInteraction = input.interactionId
+      ? await db.select({ kind: issueThreadInteractions.kind }).from(issueThreadInteractions).where(and(
+          eq(issueThreadInteractions.id, input.interactionId),
+          eq(issueThreadInteractions.companyId, input.connection.companyId),
+        )).limit(1).then((rows) => rows[0] ?? null)
+      : null;
+    // A task callback only prepares the catalog. The intent completion transaction
+    // validates current ownership and adds the requesting agent's access.
+    const deferTaskAccess = linkedInteraction?.kind === "connection_intent";
     const installs = await db.select().from(toolConnectionInstalls).where(and(
       eq(toolConnectionInstalls.companyId, input.connection.companyId),
       eq(toolConnectionInstalls.connectionId, input.connection.id),
@@ -10788,7 +10843,9 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       : suggestedAgentIds.length > 0
         ? { agentIds: suggestedAgentIds }
         : "all_agents";
-    const access: FinishToolApp["access"] = installs.length === 0
+    const access: FinishToolApp["access"] = deferTaskAccess
+      ? { agentIds: [] }
+      : installs.length === 0
       ? normalizedSuggestedAccess
       : companyInstall
         ? "all_agents"
@@ -10812,8 +10869,9 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         ? enabledCatalog.filter((entry) => entry.status === "quarantined").map((entry) => entry.id)
         : undefined,
       access,
+      preserveExistingAccess: deferTaskAccess,
     }, input.actor);
-    if (installs.length === 0) {
+    if (!deferTaskAccess && installs.length === 0) {
       const installTargets = access === "all_agents"
         ? [{ targetType: "company" as const, targetId: input.connection.companyId }]
         : [...new Set(access.agentIds)].map((agentId) => ({ targetType: "agent" as const, targetId: agentId }));
@@ -11105,6 +11163,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       : recommended;
     const finished = shouldFinalizeManagedDefaults
       ? await finishOAuthCatalogWithRecommendedDefaults({
+          interactionId: stateRow.interactionId,
           connection,
           catalog: refresh.catalog,
           suggestedDefaults,
@@ -11254,6 +11313,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     const method = connectionMethodForConnection(galleryEntry, connection);
     const refresh = await refreshCatalog(connection.id, input.actor, {
       enableAllByDefault: true,
+      skipDefaultProfileSync: true,
       credentialHeaders: {
         ...projectedConnectionHeaders(connection),
         [credential.headerName]: `${credential.headerPrefix ?? ""}${token.token}`,
@@ -11261,6 +11321,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     });
     const suggestedDefaults = recommendedDefaultsForApp(galleryEntry, method.key);
     const finished = await finishOAuthCatalogWithRecommendedDefaults({
+      interactionId: stateRow.interactionId,
       connection,
       catalog: refresh.catalog,
       suggestedDefaults,
@@ -11512,6 +11573,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       // Activate and discover with the just-issued token before returning.
       const refresh = await refreshCatalog(connection.id, input.actor, {
         enableAllByDefault: true,
+      skipDefaultProfileSync: true,
         credentialHeaders: { Authorization: `Bearer ${token.accessToken}` },
       });
       const [application] = await db.select().from(toolApplications).where(eq(toolApplications.id, connection.applicationId));
@@ -11520,6 +11582,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         ? recommendedDefaultsForApp(galleryEntry, connectionMethodForConnection(galleryEntry, connection).key)
         : { access: "all_agents" as const, askFirstRiskLevels: [] };
       const finished = await finishOAuthCatalogWithRecommendedDefaults({
+        interactionId: stateRow.interactionId,
         connection,
         catalog: refresh.catalog,
         suggestedDefaults,
@@ -11665,7 +11728,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     });
 
     await checkConnectionHealth(connection.id, input.actor);
-    const refresh = await refreshCatalog(connection.id, input.actor, { enableAllByDefault: true });
+    const refresh = await refreshCatalog(connection.id, input.actor, { enableAllByDefault: true, skipDefaultProfileSync: true });
     const [application] = await db.select().from(toolApplications).where(eq(toolApplications.id, connection.applicationId));
     const suggestedDefaults = galleryEntry ? recommendedDefaultsForApp(
       galleryEntry,
@@ -11675,6 +11738,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       askFirstRiskLevels: [],
     };
     const finished = await finishOAuthCatalogWithRecommendedDefaults({
+      interactionId: stateRow.interactionId,
       connection,
       catalog: refresh.catalog,
       suggestedDefaults,
@@ -11703,7 +11767,9 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     connectionId: string,
     input: FinalizeOAuthAccess,
     actor?: ActorInfo,
+    requestingAgentId?: string,
   ): Promise<FinishToolAppResult> {
+    if (requestingAgentId) await assertAgentsInCompany(companyId, [requestingAgentId]);
     let connection = await getConnectionRow(connectionId, companyId);
     if (connection.authKind !== "oauth") throw badRequest("This connection does not use browser sign-in");
     if (connection.status === "archived") throw conflict("Archived app connections cannot be finished");
@@ -11921,13 +11987,14 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       askFirstCatalogEntryIds: catalog
         .filter((entry) => askFirstRiskLevels.has(entry.riskLevel))
         .map((entry) => entry.id),
-      access: "all_agents",
+      access: requestingAgentId ? { agentIds: [requestingAgentId] } : "all_agents",
+      preserveExistingAccess: Boolean(requestingAgentId),
     }, actor);
     await db.insert(toolConnectionInstalls).values({
       companyId,
       connectionId: connection.id,
-      targetType: "company",
-      targetId: companyId,
+      targetType: requestingAgentId ? "agent" : "company",
+      targetId: requestingAgentId ?? companyId,
       createdByUserId: actorUserId,
     }).onConflictDoNothing();
     return finished;
@@ -12362,6 +12429,70 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
       }
       if (!row) throw notFound("Tool application not found");
       return toApplication(row);
+    },
+
+    // Repository discovery uses credential audiences, not connection-management
+    // visibility. An administrator cannot browse another user's private repos.
+    listProjectRepositories: async (companyId: string, userId: string | null, localTrusted = false) => {
+      const [connections, grants, members, memberships] = await Promise.all([
+        db.select().from(toolConnections).where(and(eq(toolConnections.companyId, companyId), eq(toolConnections.enabled, true))),
+        db.select().from(connectionGrants).where(eq(connectionGrants.companyId, companyId)),
+        db.select().from(connectionGrantMembers).where(eq(connectionGrantMembers.companyId, companyId)),
+        userId ? db.select().from(companyMemberships).where(and(
+          eq(companyMemberships.companyId, companyId), eq(companyMemberships.principalType, "user"),
+          eq(companyMemberships.principalId, userId), eq(companyMemberships.status, "active"),
+        )) : Promise.resolve([]),
+      ]);
+      const repositories = new Map<string, import("@paperclipai/shared").ProjectRepository>();
+      let connectionCount = 0;
+      let failedConnectionCount = 0;
+      for (const connection of connections) {
+        if (connection.status !== "active" || asRecord(connection.config).sourceTemplateKey !== "github") continue;
+        const connectionGrants = grants.filter((grant) => grant.connectionId === connection.id);
+        const availableGrants = connectionGrants.filter((grant) =>
+          !(grant.kind === "organization" && ["per_user", "per_agent"].includes(connection.credentialPolicy))
+          && canBrowseProjectRepositoryGrant({
+          grant, userId, activeMember: localTrusted || memberships.length > 0,
+          audience: members.filter((member) => member.grantId === grant.id).map((member) => member.subjectId),
+        }));
+        // Legacy shared PAT connections predate grants. Never fall back when a
+        // grant exists but is revoked, private, or outside the caller's audience.
+        const legacyShared = connectionGrants.length === 0 && connection.credentialPolicy === "shared"
+          && (localTrusted || !!userId && memberships.length > 0);
+        if (!availableGrants.length && !legacyShared) continue;
+        connectionCount += 1;
+        const actor: ActorInfo = { actorType: "user", actorId: userId ?? "board" };
+        let failed = false;
+        for (const initialGrant of legacyShared ? [null] : availableGrants) {
+          try {
+            let rows: Array<{ id: string; fullName: string; private?: boolean }>;
+            if (initialGrant && asRecord(asRecord(connection.config).oauth).connectorProfile === "github.code") {
+              const grant = await refreshManagedGitHubGrantAccess(connection, initialGrant, actor);
+              rows = grant.providerTenant?.github?.repositories ?? [];
+            } else {
+              const headers = initialGrant
+                ? await (async () => {
+                  const ref = initialGrant.credentialSecretRefs.find((ref) =>
+                    ref.configPath === "oauth.access_token" || /authorization|token|api_key/i.test(ref.configPath));
+                  if (!ref) throw unprocessable("Reconnect GitHub to load repositories");
+                  const secret = await resolveOAuthGrantSecret(connection, initialGrant, ref, actor, undefined);
+                  return { Authorization: `Bearer ${secret.value}` };
+                })()
+                : await resolveCredentialHeaders(connection, actor);
+              rows = await loadGitHubTokenRepositories(headers);
+            }
+            for (const row of rows) {
+              mergeProjectRepository(repositories, row, connection.name);
+            }
+          } catch {
+            // Credential/provider errors may contain secrets. Only expose an
+            // aggregate failure; successful connections remain usable.
+            failed = true;
+          }
+        }
+        if (failed) failedConnectionCount += 1;
+      }
+      return { repositories: [...repositories.values()].sort((a, b) => a.fullName.localeCompare(b.fullName)), connectionCount, failedConnectionCount };
     },
 
     listConnections: async (companyId: string): Promise<ToolConnection[]> => {
@@ -13880,6 +14011,11 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         );
       }
 
+      if (runContext.run.activeIdentityContextId && (
+        connection.config.sourceTemplateKey === "github" || connection.transportConfig?.sourceTemplateKey === "github"
+      )) {
+        await fail(409, "Use managed git, gh, or GitHub tools for this run", "denied", "managed_github_invocation_required");
+      }
       const requestedSubject = input.body.subject;
       if (requestedSubject?.type === "user" && requestedSubject.userId !== runContext.responsibleUserId) {
         await fail(403, "The agent run cannot act as the requested user", "denied", "subject_not_permitted", {

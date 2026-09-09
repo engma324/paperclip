@@ -275,6 +275,15 @@ These browser suites are intended for targeted local verification and CI, not th
 
 For normal issue work, start with the smallest targeted check that proves the change. Reserve repo-wide typecheck/build/test runs for PR-ready handoff or changes broad enough that narrow checks do not cover the risk.
 
+### Recent task ordering
+
+The streamlined sidebar keeps five recent tasks per company and account in browser
+storage. It sorts by the newest observed task or comment activity, not by live-run
+state. Older detail responses cannot move the stored activity time backward.
+Activity-only reorderings wait for one second without further activity changes;
+new and removed tasks appear immediately. Titles, status, and live indicators stay
+current during that delay.
+
 ## One-Command Local Run
 
 For a first-time local install, you can bootstrap and run in one command:
@@ -785,12 +794,32 @@ When a workspace service runs Paperclip for browser OAuth QA, configure its `exp
 
 ## Paperclip Runner Adapter Conversion
 
-The experimental Paperclip Runner currently qualifies four local profiles:
-Codex, OpenCode, ACPX Claude, and ACPX Codex. Changing an existing agent to
-`paperclip_runner` remains supported only from `codex_local`; create the other
-profiles explicitly after enabling the single **Paperclip Runner** experimental
-setting. Onboarding continues to create legacy adapters. Disabling the setting
-blocks fresh native starts without hiding or corrupting persisted native runs.
+The experimental Paperclip Runner offers native Codex, OpenCode, and **ACPX
+Claude**. Converting an existing Claude, Codex, or OpenCode agent selects its
+corresponding provider, preserves compatible models, credentials, workspace,
+and instructions, and resets execution sessions while retaining run history.
+Other adapters require an explicit provider choice. Legacy ACPX Codex agent
+settings normalize to native Codex on configuration updates and before fresh
+runs; immutable run descriptors remain readable. The **Paperclip Runner**
+experimental setting and company access checks still apply.
+
+Agent configuration uses the same section layout across adapters: model and
+provider belong to **Adapter**, environment variables have their own section,
+and command/extra arguments are folded under **Configuration → Advanced**.
+Lifecycle, timeout, and interrupt grace settings live under **Advanced Run
+Policy**. Permission selectors with a single valid mode are hidden; a saved
+unsupported mode still exposes remediation.
+
+Model catalogs and refresh follow the selected provider. ACPX Claude uses the
+normal Claude catalog and accepts custom model IDs; the exact ID is sent to
+Claude, which can reject unavailable models. Package/version verification is
+independent of model selection. Environment tests verify runtime installation;
+a successful provider run additionally verifies credentials and model access.
+
+ACPX Claude supports Linux x64 and macOS ARM64/x64 with pinned SDK executables.
+On macOS the launcher uses private verified module/executable snapshots instead
+of Linux `/proc` descriptors. Dependency isolation, process ownership, and
+cancellation remain enforced; the snapshot is removed when the provider exits.
 
 Native Codex is qualified only with `codexPermissionMode: "never"`. The create
 and edit surfaces do not offer `on-request` or `untrusted`, and a persisted
@@ -849,6 +878,14 @@ that classification finishes.
   signal it or spawn a replacement.
 - A persisted proposed or terminal result is reconciled before any runner or
   provider work starts, so restart recovery cannot submit a duplicate turn.
+- On the next run, a completed local Codex session whose warm controller died
+  before suspension is recovered automatically, including a uniquely verified
+  checkpoint quarantined by older controllers. Paperclip requires matching
+  database/session/provider identities, a settled terminal journal, no pending
+  commands or active provider turn, and a confirmed-dead process and process
+  group. It seals the old authority for normal epoch rotation and preserves the
+  Codex thread and goal state. Empty retry directories do not prevent recovery;
+  conflicting histories, changed profiles, and live or unverifiable owners do.
 
 Run the credential-free real-process restart suite with:
 
@@ -1260,3 +1297,7 @@ Networking behavior for this smoke script:
 - auto-detects and prints a Paperclip host URL reachable from inside OpenClaw Docker
 - default container-side host alias is `host.docker.internal` (override with `PAPERCLIP_HOST_FROM_CONTAINER` / `PAPERCLIP_HOST_PORT`)
 - if Paperclip rejects container hostnames in authenticated/private mode, allow `host.docker.internal` via `npx paperclipai allowed-hostname host.docker.internal` and restart Paperclip
+
+### GitHub identity for shared agents
+
+See [execution GitHub identity](execution-github-identity.md) for the operation-time credential contract, continuation rules, runtime rollout, and acceptance-test requirements.
