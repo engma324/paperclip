@@ -1,4 +1,5 @@
 import { useCallback, useContext, useState, type ReactNode } from "react";
+import { useEmailComment } from "@/components/EmailMessageCard";
 import type { IssueAttachment } from "@paperclipai/shared";
 import { IssueGalleryContext } from "@/context/IssueGalleryContext";
 import { cn } from "@/lib/utils";
@@ -10,7 +11,6 @@ import {
 } from "@/components/ImageGalleryModal";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { AgentIcon } from "@/components/AgentIconPicker";
-import { CommentAttributionChip } from "@/components/CommentAttributionChip";
 import {
   Attachment,
   AttachmentContent,
@@ -74,11 +74,9 @@ function initialsForName(name: string) {
 export function TaskChatAgentIdentity({
   agentName,
   agentIcon,
-  onBehalfOfUserName,
 }: {
   agentName: string;
   agentIcon?: string | null;
-  onBehalfOfUserName?: string;
 }) {
   return (
     <span
@@ -99,12 +97,6 @@ export function TaskChatAgentIdentity({
         )}
       </Avatar>
       <span className="text-sm font-semibold text-foreground">{agentName}</span>
-      {onBehalfOfUserName ? (
-        <CommentAttributionChip
-          agentName={agentName}
-          userName={onBehalfOfUserName}
-        />
-      ) : null}
     </span>
   );
 }
@@ -140,7 +132,11 @@ function uniqueAttachmentRefs(refs: AttachmentRef[]): AttachmentRef[] {
   );
 }
 
-export function TaskChatBubble({
+export function TaskChatBubble(props: TaskChatBubbleProps) {
+  const email = useEmailComment(props.item.id);
+  return email ?? <TaskChatBubbleContent {...props} />;
+}
+function TaskChatBubbleContent({
   item,
   animateEntry = true,
   queuedAction,
@@ -181,6 +177,7 @@ export function TaskChatBubble({
   }
 
   const isHuman = item.author === "human";
+  const sentFromIMessage = isHuman && item.sourceChannel === "imessage-photon";
   // Non-image file references ("[name](/api/attachments/…/content)") render as
   // attachment chips under the bubble; link-only lines leave the body text.
   const { refs: linkedRefs, text: bodyWithoutAttachmentLinks } =
@@ -235,7 +232,6 @@ export function TaskChatBubble({
         <TaskChatAgentIdentity
           agentName={item.authorName}
           agentIcon={item.agentIcon}
-          onBehalfOfUserName={item.onBehalfOfUserName}
         />
       ) : null}
       {bodyText.length > 0 ? (
@@ -413,9 +409,11 @@ export function TaskChatBubble({
             ) : null}
           </div>
         )
-      ) : item.timestamp ? (
+      ) : item.timestamp || sentFromIMessage ? (
         // Timestamps are always visible (round 9) — no longer hover-revealed.
         <span className="px-1 text-(length:--text-micro) text-muted-foreground">
+          {sentFromIMessage ? "Sent from iMessage" : null}
+          {sentFromIMessage && item.timestamp ? " · " : null}
           {item.timestamp}
         </span>
       ) : null}

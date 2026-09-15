@@ -10,5 +10,5 @@ permissions:
 
 jobs:
   ci:
-    # Pin: #12858 merge — docker context integrity gate + traceability context fix.
-    uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@03609aa6ecc9a047ed53d6b6469d8be554fbc46d
+    # Pin: #13457 merge — restore-only Rust dependency cache on the PR runner lane.
+    uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@f97a3f886eb4baf19ea8eefaa53a44cb1c2d4636
