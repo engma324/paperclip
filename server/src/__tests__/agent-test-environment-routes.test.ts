@@ -103,28 +103,19 @@ const externalAdapter: ServerAdapterModule = {
 
 // Only the runtime preparation is replaced: it needs a database and a stored
 // grant, and these tests exercise the route's verdict, not credential
-// resolution. Everything else in the module stays real. The same goes for
-// validateAiApiKey — it calls the provider's real endpoint, and these tests
-// direct its verdict instead of the network.
+// resolution. Everything else in the module stays real.
 const mockPrepareManagedAiRuntime = vi.hoisted(() => vi.fn());
 vi.mock("../services/ai-connection-runtime.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../services/ai-connection-runtime.js")>()),
   prepareManagedAiRuntime: mockPrepareManagedAiRuntime,
 }));
-const mockValidateAiApiKey = vi.hoisted(() => vi.fn(async () => undefined));
-vi.mock("../routes/ai-connections.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../routes/ai-connections.js")>()),
-  validateAiApiKey: mockValidateAiApiKey,
-}));
 
-function mockManagedRuntime(method: "api_key" | "subscription") {
+function mockManagedRuntime(method: "api_key" | "subscription", key = "sk-ant-test-key") {
   mockPrepareManagedAiRuntime.mockImplementation(
     async (_db: unknown, input: { config: Record<string, unknown> }) => ({
       config: {
         ...input.config,
-        // The real preparation injects the credential under the provider's
-        // env key; the adoption re-verification reads it from there.
-        env: { ...(method === "api_key" ? { ANTHROPIC_API_KEY: "sk-ant-test-key" } : {}) },
+        env: { ...(method === "api_key" && key ? { ANTHROPIC_API_KEY: key } : {}) },
         managedAiConnection: {
           connectionId: "conn-1",
           grantId: "grant-1",
@@ -406,14 +397,9 @@ describe("agent test-environment route", () => {
     }
   });
 
-  // The managed-adoption verdict, all three ways. An api_key account is
-  // re-verified against the provider's endpoint at adoption — the same check
-  // its save performed, catching a key revoked since — but never through the
-  // CLI-lane hello probe, which a clean machine without a provider CLI can
-  // never pass (the regression that walled off onboarding's API-key path in
-  // the nightly release smoke). A stored subscription login still needs the
-  // hello probe: only a real turn proves the runtime lane can consume it.
-  it("adopts an api_key connection on the engine's verdict plus a live key check, without a CLI hello probe", async () => {
+  // API-key adoption uses the engine's verdict and resolved credential;
+  // subscriptions still need a CLI hello probe.
+  it("adopts an api_key connection on the engine's verdict without a provider key check or CLI hello probe", async () => {
     mockManagedRuntime("api_key");
     // A sentinel in claude_local's slot: the forced CLI-lane fallback would
     // land here, so the fix is proven by this never being consulted — not by
@@ -439,8 +425,7 @@ describe("agent test-environment route", () => {
       expect(res.status).toBe(200);
       expect(res.body.status).toBe("pass");
       expect(JSON.stringify(res.body)).not.toContain("ai_connection_validation_incomplete");
-      expect(res.body.checks.map((check: { code: string }) => check.code)).toContain("ai_connection_api_key_reverified");
-      expect(mockValidateAiApiKey).toHaveBeenCalledWith("anthropic", "sk-ant-test-key");
+      expect(res.body.checks.map((check: { code: string }) => check.code)).not.toContain("ai_connection_api_key_reverified");
       expect(testEnvironmentSpy).toHaveBeenCalledTimes(1);
       expect(cliProbeSpy).not.toHaveBeenCalled();
     } finally {
@@ -449,9 +434,8 @@ describe("agent test-environment route", () => {
     }
   });
 
-  it("fails adoption of an api_key connection the provider no longer accepts", async () => {
-    mockManagedRuntime("api_key");
-    mockValidateAiApiKey.mockRejectedValueOnce(Object.assign(new Error("The provider rejected this API key."), { status: 422 }));
+  it("fails adoption of an api_key connection when the resolved key is missing", async () => {
+    mockManagedRuntime("api_key", "");
     const app = await createApp();
     const res = await request(app)
       .post("/api/companies/company-1/adapters/external_test/test-environment")
@@ -461,7 +445,7 @@ describe("agent test-environment route", () => {
       });
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("fail");
-    expect(res.body.checks.map((check: { code: string }) => check.code)).toContain("ai_connection_api_key_rejected");
+    expect(res.body.checks.map((check: { code: string }) => check.code)).toContain("ai_connection_api_key_missing");
   });
 
   it("still fails subscription adoption when no hello probe can run", async () => {

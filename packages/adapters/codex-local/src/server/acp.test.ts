@@ -788,9 +788,9 @@ describe("codex_local ACP lane", () => {
     });
   });
 
-  it("merges and restores provider config in the managed ACPX Codex home", async () => {
+  it.each(["company", "ai_connection", "external"] as const)("handles provider config in the %s ACPX Codex home", async homeKind => {
     const root = await makeTempRoot("paperclip-codex-acp-provider-config-");
-    const managedHome = path.join(
+    const companyHome = path.join(
       root,
       "paperclip-home",
       "instances",
@@ -799,6 +799,11 @@ describe("codex_local ACP lane", () => {
       "company-1",
       "codex-home",
     );
+    const aiHome = homeKind === "ai_connection"
+      ? await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ai-company-1-grant-1-"))
+      : null;
+    if (aiHome) tempRoots.push(aiHome);
+    const managedHome = aiHome ? path.join(aiHome, "provider") : homeKind === "external" ? path.join(root, "external-codex") : companyHome;
     const baselineConfig = "[features]\nshell_snapshot = false\n";
     await fs.mkdir(managedHome, { recursive: true });
     await fs.writeFile(path.join(managedHome, "config.toml"), baselineConfig, "utf8");
@@ -823,8 +828,10 @@ describe("codex_local ACP lane", () => {
         engine: "acp",
         cwd: root,
         stateDir: path.join(root, "state"),
+        ...(homeKind !== "company" ? { managedAiConnection: { provider: "openai", method: "api_key", grantId: "grant-1" } } : {}),
         env: {
           CODEX_HOME: managedHome,
+          ...(homeKind !== "company" ? { HOME: aiHome ?? root } : {}),
           OPENAI_API_KEY: "test-key",
           PAPERCLIP_CODEX_PROVIDERS: JSON.stringify({
             providers: {
@@ -842,8 +849,12 @@ describe("codex_local ACP lane", () => {
 
     expect(result.exitCode, JSON.stringify(result)).toBe(0);
     expect(configDuringSession).toContain(baselineConfig.trim());
-    expect(configDuringSession).toContain('model_provider = "azure_foundry"');
-    expect(configDuringSession).toContain("[model_providers.azure_foundry]");
+    if (homeKind === "external") {
+      expect(configDuringSession).not.toContain("azure_foundry");
+    } else {
+      expect(configDuringSession).toContain('model_provider = "azure_foundry"');
+      expect(configDuringSession).toContain("[model_providers.azure_foundry]");
+    }
     await expect(fs.readFile(path.join(managedHome, "config.toml"), "utf8")).resolves.toBe(
       baselineConfig,
     );

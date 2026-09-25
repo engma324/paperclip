@@ -30,8 +30,13 @@ by agent setup. Supported sandbox environments use onboarding's existing browser
 sign-in controllers. Self-hosted installations use the shared terminal sign-in
 instructions described below and require no sandbox. Environment selection does
 not change agent execution settings.
-API keys are validated against fixed provider endpoints; redirects
-and caller-supplied validation URLs are rejected.
+API keys are stored without a request to a fixed provider endpoint. During agent
+setup the selected environment checks that the key is available and the adapter
+can run; actual provider authentication may still fail when the agent executes.
+For Codex local ACPX runs, `PAPERCLIP_CODEX_PROVIDERS` also applies to an
+isolated managed AI connection home. Set the custom provider's `env_key` to
+`OPENAI_API_KEY` when using a managed OpenAI API key. Explicit external
+`CODEX_HOME` directories remain user-managed and are not modified.
 
 `runtimeConfig.aiConnection` contains `provider`, `mode`, and `method`. For responsible-user selections, `method` is a legacy wire hint retained for rolling upgrades; the resolver uses the selected account’s actual method:
 
@@ -273,10 +278,10 @@ AI_CONNECTIONS_TEST_COMPANY_ID=<company-id> pnpm exec playwright test --config t
 
 Set `AI_CONNECTIONS_TEST_URL` when the test drive uses a port other than 3100.
 
-These browser checks exercise the production list/detail pages, rejected API-key
-validation, cancellation, focus restoration, and adoption without saving agent
-changes. They submit an explicitly invalid fixture key and do not prove successful
-authentication with a live account.
+These browser checks exercise the production list/detail pages, simulated
+API-key storage failure, cancellation, focus restoration, and adoption without
+saving agent changes. They do not prove successful authentication with a live
+account.
 
 ### Local sign-in checks
 

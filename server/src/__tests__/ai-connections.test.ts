@@ -19,7 +19,6 @@ import { aiConnectionBindingSchema, connectionPurposeTransportSchema, isAiConnec
 import express from "express";
 import request from "supertest";
 import { aiConnectionRoutes, canInstallSharedAiConnectionForNewAgent, responsibleUserForAiRequest } from "../routes/ai-connections.js";
-import { validateAiApiKey } from "../routes/ai-connections.js";
 
 let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
 let db: ReturnType<typeof createDb>;
@@ -477,7 +476,7 @@ describe("managed AI connections", () => {
     await expect(service.save(companyId, "alice", { ...intent, agentIds: [] }, "fixture-never-save", sessionId)).rejects.toThrow("no longer active");
     expect((await service.list(companyId, "alice")).some(account => account.name === "Expired")).toBe(false);
   });
-  it("authorizes account creation, reconnect and defaults at the HTTP boundary before provider calls", async () => {
+  it("authorizes account creation, reconnect and defaults without provider calls", async () => {
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
@@ -488,17 +487,21 @@ describe("managed AI connections", () => {
     });
     app.use("/api", aiConnectionRoutes(db));
     app.use((error: { status?: number; message: string }, _req: express.Request, res: express.Response, _next: express.NextFunction) => { res.status(error.status ?? 500).json({ error: error.message }); });
-    const personal = await service.select({ ...input, userId: "alice" });
+    const personal = await create("alice", "Route auth fixture");
     const base = `/api/companies/${companyId}/ai-connections`;
     expect((await request(app).get(`/api/companies/${otherCompanyId}/ai-connections`)).status).toBe(403);
-    expect((await request(app).put(`${base}/default`).set("x-test-user", "bob").send({ grantId: personal.grant.id })).status).toBe(403);
-    expect((await request(app).put(`${base}/default`).set("x-test-role", "viewer").send({ grantId: personal.grant.id })).status).toBe(403);
+    expect((await request(app).put(`${base}/default`).set("x-test-user", "bob").send({ grantId: personal.grantId })).status).toBe(403);
+    expect((await request(app).put(`${base}/default`).set("x-test-role", "viewer").send({ grantId: personal.grantId })).status).toBe(403);
     const payload = { provider: "anthropic", method: "api_key", name: "Fixture", ownership: "personal", apiKey: "fixture", allAgents: false, agentIds: [] };
     const network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("must not reach provider"));
     try {
       expect((await request(app).post(base).set("x-test-role", "viewer").send(payload)).status).toBe(403);
       expect((await request(app).post(base).send({ ...payload, ownership: "shared" })).status).toBe(403);
-      expect((await request(app).post(base).set("x-test-user", "bob").send({ ...payload, connectionId: personal.connection.id })).status).toBe(403);
+      expect((await request(app).post(base).set("x-test-user", "bob").send({ ...payload, connectionId: personal.connectionId })).status).toBe(403);
+      expect(network).not.toHaveBeenCalled();
+      const saved = await request(app).post(base).send({ ...payload, provider: "openai", name: "Foundry", apiKey: "foundry-fixture" });
+      expect(saved.status).toBe(201);
+      expect((await service.list(companyId, "alice")).some(account => account.name === "Foundry" && account.provider === "openai")).toBe(true);
       expect(network).not.toHaveBeenCalled();
     } finally { network.mockRestore(); }
   });
@@ -608,11 +611,6 @@ describe("managed AI connections", () => {
       expect((await service.list(companyId, owner)).filter(c => c.name === intent.name)).toHaveLength(1);
     } finally { reader.mockRestore(); }
   });
-  it("rejects invalid credentials without exposing the provider response", async () => {
-    const request = vi.fn().mockResolvedValue(new Response("secret-provider-body", { status: 401 }));
-    await expect(validateAiApiKey("anthropic", "fixture", request)).rejects.toThrow("rejected");
-    expect(request.mock.calls[0][1].redirect).toBe("error");
-  });
   it("uses the authenticated responsible user for agent-originated configuration and tests", async () => {
     const req = { actor: { type: "agent", agentId, onBehalfOfUserId: "alice" } } as express.Request;
     const selected = await service.select({ ...input, userId: responsibleUserForAiRequest(req) });
@@ -694,7 +692,7 @@ describe("managed AI connections", () => {
     app.use("/api", agentRoutes(db));
     app.use((error: { status?: number; message: string }, _req: express.Request, res: express.Response, _next: express.NextFunction) => { res.status(error.status ?? 500).json({ error: error.message }); });
     const selected = { provider: "openai", method: "api_key", mode: "responsible_user" } as const;
-    const providerRequest = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(null, { status: 200 }));
+    const providerRequest = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("must not reach provider"));
     try {
       // Target resolution can return only warning checks. Adoption still must
       // fail closed, rather than quietly running the probe on the server host.
@@ -710,10 +708,7 @@ describe("managed AI connections", () => {
       expect(saved.body.runtimeConfig.aiConnection).toEqual(selected);
       expect(acquire).toHaveBeenCalledWith(expect.objectContaining({ companyId, environment: expect.objectContaining({ id: environment.id }) }));
       expect(probe).toHaveBeenCalledWith(expect.objectContaining({ executionTarget: target, config: expect.objectContaining({ provider: "codex", model: "gpt-5.6-sol", managedAiConnection: expect.any(Object) }) }));
-      expect(providerRequest).toHaveBeenCalledWith("https://api.openai.com/v1/models", expect.objectContaining({
-        headers: { Authorization: "Bearer fixture-adoption-key" },
-        redirect: "error",
-      }));
+      expect(providerRequest).not.toHaveBeenCalled();
       expect(release).toHaveBeenCalledTimes(2);
       expect(JSON.stringify(saved.body)).not.toContain("fixture-adoption-key");
     } finally {

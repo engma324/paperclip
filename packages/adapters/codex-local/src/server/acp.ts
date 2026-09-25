@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -270,9 +271,19 @@ async function prepareCodexAcpProviderConfig(input: {
 }) {
   const configuredEnv = parseObject(input.config.env);
   const configuredCodexHome = firstNonEmptyString(configuredEnv.CODEX_HOME);
+  const configuredHome = firstNonEmptyString(configuredEnv.HOME);
+  const managedConnection = parseObject(input.config.managedAiConnection);
+  const isolatedAiHome =
+    managedConnection.provider === "openai" &&
+    typeof managedConnection.grantId === "string" &&
+    configuredHome !== undefined &&
+    path.resolve(input.codexHome) === path.join(path.resolve(configuredHome), "provider") &&
+    path.dirname(path.resolve(configuredHome)) === path.resolve(os.tmpdir()) &&
+    path.basename(configuredHome).startsWith(`paperclip-ai-${input.companyId}-${managedConnection.grantId}-`);
   const managedHome =
     configuredCodexHome === undefined ||
-    isManagedCodexHomePath(process.env, input.companyId, input.codexHome);
+    isManagedCodexHomePath(process.env, input.companyId, input.codexHome) ||
+    isolatedAiHome;
   const prepared = await prepareCodexRuntimeConfig({
     env: input.env,
     codexHome: managedHome ? input.codexHome : null,

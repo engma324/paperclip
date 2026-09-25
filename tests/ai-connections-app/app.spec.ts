@@ -36,14 +36,17 @@ test("existing Connections lists AI providers and keeps account management compa
   await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
 });
 
-test("rejected API credentials do not create a connection, and cancellation returns to Connections", async ({ page, request }, testInfo) => {
+test("failed API-key storage does not create a connection, and cancellation returns to Connections", async ({ page, request }, testInfo) => {
   const before = await (await request.get(`/api/companies/${companyId}/ai-connections`)).json();
+  await page.route(`**/api/companies/${companyId}/ai-connections`, route => route.request().method() === "POST"
+    ? route.fulfill({ status: 422, json: { error: "Could not store the API key." } })
+    : route.continue());
   await page.goto(`/${prefix}/apps/connect?source=openrouter&method=ai-api_key`);
   await page.getByRole("button", { name: /^(Save and continue|Continue)$/ }).click();
-  await page.getByLabel("Connection name").fill("Rejected browser test account");
-  await page.getByRole("textbox", { name: "API key", exact: true }).fill("invalid-ai-connection-browser-test");
+  await page.getByLabel("Connection name").fill("Failed browser test account");
+  await page.getByRole("textbox", { name: "API key", exact: true }).fill("browser-test-key");
   await page.getByRole("button", { name: "Connect", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText(/rejected|Could not verify|could not verify/);
+  await expect(page.getByRole("alert")).toContainText("Could not store the API key.");
   await expect(page.getByRole("textbox", { name: "API key", exact: true })).toHaveValue("");
   const after = await (await request.get(`/api/companies/${companyId}/ai-connections`)).json();
   expect(after.connections.map((entry: { id: string }) => entry.id).sort()).toEqual(before.connections.map((entry: { id: string }) => entry.id).sort());

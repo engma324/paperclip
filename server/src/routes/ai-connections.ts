@@ -19,7 +19,6 @@ import {
   localAiLoginStartSchema,
   isAiConnectionCompatible,
   type AiConnectionLoginIntent,
-  type AiProvider,
   type AiConnectionBinding,
 } from "@paperclipai/shared";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
@@ -130,40 +129,6 @@ export async function canInstallSharedAiConnectionForNewAgent(
   if (!connection) return false;
   return req.actor.source === "local_implicit" || req.actor.isInstanceAdmin === true ||
     connection.creator === userId || await accessService(db).hasPermission(companyId, "user", userId, "tools:manage_connections");
-}
-
-/** Fixed provider endpoints; credentials are never sent to a caller-supplied URL or through a redirect. */
-export async function validateAiApiKey(
-  provider: AiProvider,
-  key: string,
-  request: typeof fetch = fetch,
-) {
-  const endpoints = {
-    anthropic: "https://api.anthropic.com/v1/models?limit=1",
-    openai: "https://api.openai.com/v1/models",
-    openrouter: "https://openrouter.ai/api/v1/key",
-    xai: "https://api.x.ai/v1/models",
-  };
-  let response: Response;
-  try {
-    response = await request(endpoints[provider], {
-      redirect: "error",
-      signal: AbortSignal.timeout(15000),
-      headers:
-        provider === "anthropic"
-          ? { "x-api-key": key, "anthropic-version": "2023-06-01" }
-          : { Authorization: `Bearer ${key}` },
-    });
-  } catch {
-    throw unprocessable("Could not verify the account. Try again.");
-  }
-  await response.body?.cancel();
-  if (!response.ok)
-    throw unprocessable(
-      response.status === 401 || response.status === 403
-        ? "The provider rejected this API key."
-        : "The provider could not verify this account. Try again.",
-    );
 }
 
 export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLocalAiLogin>[0] = {}) {
@@ -281,7 +246,6 @@ export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLo
           "Use the existing provider sign-in flow to connect a subscription",
         );
       const attemptStartedAt = new Date();
-      await validateAiApiKey(input.provider, input.apiKey!);
       const result = await service.save(
         companyId,
         userId,
